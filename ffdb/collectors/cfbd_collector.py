@@ -111,7 +111,7 @@ class CFBDCollector:
         logger.info("Fetching team season stats for %d...", year)
         with cfbd.ApiClient(self._config) as client:
             api = self._stats_api(client)
-            result = self._call(api.get_team_season_stats, year=year)
+            result = self._call(api.get_team_stats, year=year)
         logger.info("  Retrieved %d team-stat rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -152,7 +152,7 @@ class CFBDCollector:
         with cfbd.ApiClient(self._config) as client:
             api = self._metrics_api(client)
             result = self._call(
-                api.get_player_season_ppa,
+                api.get_predicted_points_added_by_player_season,
                 year=year,
                 exclude_garbage_time=exclude_garbage_time,
             )
@@ -171,7 +171,7 @@ class CFBDCollector:
         logger.info("Fetching SP+ ratings for %d...", year)
         with cfbd.ApiClient(self._config) as client:
             api = self._ratings_api(client)
-            result = self._call(api.get_sp_ratings, year=year)
+            result = self._call(api.get_sp, year=year)
         logger.info("  Retrieved %d SP+ rating rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -206,7 +206,7 @@ class CFBDCollector:
             kwargs: dict[str, Any] = {"search_term": name}
             if position:
                 kwargs["position"] = position
-            result = self._call(api.player_search, **kwargs)
+            result = self._call(api.search_players, **kwargs)
         return result or []
 
     # ------------------------------------------------------------------

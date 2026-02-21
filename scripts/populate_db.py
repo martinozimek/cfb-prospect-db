@@ -89,7 +89,8 @@ def _parse_team_stats(raw_rows: list[Any]) -> dict[str, dict[str, Any]]:
     for row in raw_rows:
         team = getattr(row, "team", None)
         stat_name = getattr(row, "stat_name", None) or getattr(row, "type", None)
-        stat_val = getattr(row, "stat", None)
+        stat_val_obj = getattr(row, "stat_value", None)
+        stat_val = getattr(stat_val_obj, "actual_instance", None) if stat_val_obj is not None else getattr(row, "stat", None)
         if team and stat_name:
             teams.setdefault(team, {})[stat_name] = stat_val
     return teams
@@ -110,7 +111,7 @@ def _extract_team_denominators(team_stats: dict[str, Any]) -> dict[str, Optional
 
     return {
         "pass_attempts": get("passAttempts", "pass_attempts", "passingAttempts"),
-        "total_receptions": get("receptions", "passReceptions", "completionAttempts"),
+        "total_receptions": get("passCompletions", "receptions", "passReceptions"),
         "total_rec_yards": get("netPassingYards", "passingYards", "receivingYards"),
         "total_rush_yards": get("rushingYards", "netRushingYards"),
     }
@@ -185,7 +186,7 @@ def _parse_usage(raw_rows: list[Any]) -> dict[int, dict[str, Any]]:
         usage = getattr(row, "usage", None)
         result[pid] = {
             "usage_overall": _safe_float(getattr(usage, "overall", None)) if usage else None,
-            "usage_pass": _safe_float(getattr(usage, "pass_", None) or getattr(usage, "pass", None)) if usage else None,
+            "usage_pass": _safe_float(getattr(usage, "var_pass", None)) if usage else None,
             "usage_rush": _safe_float(getattr(usage, "rush", None)) if usage else None,
             "usage_1st_down": _safe_float(getattr(usage, "first_down", None)) if usage else None,
             "usage_2nd_down": _safe_float(getattr(usage, "second_down", None)) if usage else None,
@@ -210,7 +211,7 @@ def _parse_ppa(raw_rows: list[Any]) -> dict[int, dict[str, Any]]:
         avg = getattr(row, "average_ppa", None)
         result[pid] = {
             "ppa_avg_overall": _safe_float(getattr(avg, "all", None)) if avg else None,
-            "ppa_avg_pass": _safe_float(getattr(avg, "pass_", None) or getattr(avg, "pass", None)) if avg else None,
+            "ppa_avg_pass": _safe_float(getattr(avg, "var_pass", None)) if avg else None,
             "ppa_avg_rush": _safe_float(getattr(avg, "rush", None)) if avg else None,
         }
     return result

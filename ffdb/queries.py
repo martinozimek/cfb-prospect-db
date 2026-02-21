@@ -4,9 +4,11 @@ High-level query interface for the FF college football database.
 Usage:
     from ffdb import FFDatabase
 
-    db = FFDatabase("ff.db")
+    db = FFDatabase()                        # auto-discovers ff.db via .env
+    db = FFDatabase("path/to/ff.db")        # explicit path
 
-    player = db.find_player("Luther Burden")
+    profile = db.get_profile("Luther Burden")   # full player profile in one call
+    player  = db.find_player("Emeka Egbuka")    # returns Player ORM object
     print(db.get_cfb_career(player.id))
     print(db.get_player_metrics(player.id, year=2022))
 """
@@ -14,13 +16,20 @@ Usage:
 from __future__ import annotations
 
 import json
-from datetime import date
 from typing import Any, Optional
 
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from ffdb.database import CFBPlayerSeason, CFBTeamSeason, Player, Recruiting, init_db
+from ffdb.database import (
+    CFBPlayerSeason,
+    CFBTeamSeason,
+    NFLCombineResult,
+    NFLDraftPick,
+    Player,
+    Recruiting,
+    init_db,
+)
 from ffdb.utils.name_matching import find_player, find_player_one
 
 
@@ -32,7 +41,15 @@ class FFDatabase:
     sessions internally so the caller never has to manage transactions.
     """
 
-    def __init__(self, db_path: str, create_tables: bool = True):
+    def __init__(self, db_path: Optional[str] = None, create_tables: bool = True):
+        if db_path is None:
+            import sys
+            from pathlib import Path
+            _root = Path(__file__).parent.parent
+            if str(_root) not in sys.path:
+                sys.path.insert(0, str(_root))
+            from config import get_db_path
+            db_path = get_db_path()
         self._db_path = db_path
         if create_tables:
             init_db(db_path)
@@ -305,6 +322,261 @@ class FFDatabase:
                 .filter(Recruiting.player_id == player_id)
                 .first()
             )
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # NFL Combine
+    # ------------------------------------------------------------------
+
+    def get_combine(self, player_id: int) -> Optional[dict[str, Any]]:
+        """
+        Return NFL Combine measurables for a player, or None if not in the DB.
+
+        Returned dict keys:
+            combine_year, position, college,
+            height_inches, weight_lbs, forty_time, vertical_jump,
+            broad_jump, three_cone, shuttle, bench_press, speed_score
+        """
+        with self._Session() as session:
+            row = (
+                session.query(NFLCombineResult)
+                .filter(NFLCombineResult.player_id == player_id)
+                .first()
+            )
+            if row is None:
+                return None
+            return {
+                "combine_year": row.combine_year,
+                "position": row.position,
+                "college": row.college,
+                "height_inches": row.height_inches,
+                "weight_lbs": row.weight_lbs,
+                "forty_time": row.forty_time,
+                "vertical_jump": row.vertical_jump,
+                "broad_jump": row.broad_jump,
+                "three_cone": row.three_cone,
+                "shuttle": row.shuttle,
+                "bench_press": row.bench_press,
+                "speed_score": row.speed_score,
+            }
+
+    # ------------------------------------------------------------------
+    # NFL Draft
+    # ------------------------------------------------------------------
+
+    def get_draft_pick(self, player_id: int) -> Optional[dict[str, Any]]:
+        """
+        Return NFL Draft pick info for a player, or None if undrafted.
+
+        Returned dict keys:
+            draft_year, draft_round, overall_pick, nfl_team,
+            position_drafted, draft_capital_score
+        """
+        with self._Session() as session:
+            row = (
+                session.query(NFLDraftPick)
+                .filter(NFLDraftPick.player_id == player_id)
+                .first()
+            )
+            if row is None:
+                return None
+            return {
+                "draft_year": row.draft_year,
+                "draft_round": row.draft_round,
+                "overall_pick": row.overall_pick,
+                "nfl_team": row.nfl_team,
+                "position_drafted": row.position_drafted,
+                "draft_capital_score": row.draft_capital_score,
+            }
+
+    def search_draft_class(
+        self,
+        year: int,
+        position: Optional[str] = None,
+        max_round: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return all drafted WR/RB/TE players from a given draft year.
+
+        Parameters
+        ----------
+        year:      Draft year (e.g. 2024).
+        position:  Filter to 'WR', 'RB', or 'TE' (optional).
+        max_round: Only return picks up to and including this round (optional).
+
+        Each dict includes player identity + draft info, sorted by overall_pick.
+        """
+        with self._Session() as session:
+            q = (
+                session.query(Player, NFLDraftPick)
+                .join(NFLDraftPick, NFLDraftPick.player_id == Player.id)
+                .filter(NFLDraftPick.draft_year == year)
+            )
+            if position:
+                q = q.filter(NFLDraftPick.position_drafted == position.upper())
+            if max_round:
+                q = q.filter(NFLDraftPick.draft_round <= max_round)
+            rows = q.order_by(NFLDraftPick.overall_pick).all()
+
+        return [
+            {
+                "player_id": p.id,
+                "full_name": p.full_name,
+                "position": pick.position_drafted,
+                "draft_year": pick.draft_year,
+                "draft_round": pick.draft_round,
+                "overall_pick": pick.overall_pick,
+                "nfl_team": pick.nfl_team,
+                "draft_capital_score": pick.draft_capital_score,
+                "height_inches": p.height_inches,
+                "weight_lbs": p.weight_lbs,
+            }
+            for p, pick in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Full player profile (all data in one call)
+    # ------------------------------------------------------------------
+
+    def get_profile(
+        self,
+        name: str,
+        threshold: int = 80,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Return a comprehensive player profile by name, or None if not found.
+
+        Bundles identity, all college seasons, career aggregates, derived
+        metrics, recruiting, NFL combine, and NFL draft data into one dict.
+
+        Example
+        -------
+        >>> db = FFDatabase()
+        >>> p = db.get_profile("Emeka Egbuka")
+        >>> p["draft"]["draft_round"]
+        1
+        >>> p["combine"]["forty_time"]
+        4.34
+        """
+        with self._Session() as session:
+            player = find_player_one(session, name, threshold=threshold)
+            if player is None:
+                return None
+            pid = player.id
+
+            # --- identity ---
+            identity = {
+                "player_id": pid,
+                "cfbd_id": player.cfbd_id,
+                "full_name": player.full_name,
+                "position": player.position,
+                "height_inches": player.height_inches,
+                "weight_lbs": player.weight_lbs,
+                "hometown": player.hometown,
+                "home_state": player.home_state,
+            }
+
+            # --- recruiting ---
+            rec_row = (
+                session.query(Recruiting)
+                .filter(Recruiting.player_id == pid)
+                .order_by(Recruiting.recruit_year.desc())
+                .first()
+            )
+            recruiting = None
+            if rec_row:
+                recruiting = {
+                    "recruit_year": rec_row.recruit_year,
+                    "stars": rec_row.stars,
+                    "rating": rec_row.rating,
+                    "ranking_national": rec_row.ranking_national,
+                    "ranking_position": rec_row.ranking_position,
+                    "classification": rec_row.classification,
+                }
+
+            # --- college seasons ---
+            season_rows = (
+                session.query(CFBPlayerSeason)
+                .filter(CFBPlayerSeason.player_id == pid)
+                .order_by(CFBPlayerSeason.season_year)
+                .all()
+            )
+            seasons = [
+                {
+                    "season_year": s.season_year,
+                    "team": s.team,
+                    "conference": s.conference,
+                    "games_played": s.games_played,
+                    "targets": s.targets,
+                    "receptions": s.receptions,
+                    "rec_yards": s.rec_yards,
+                    "rec_tds": s.rec_tds,
+                    "rush_attempts": s.rush_attempts,
+                    "rush_yards": s.rush_yards,
+                    "rush_tds": s.rush_tds,
+                    "age_at_season_start": s.age_at_season_start,
+                    "rec_yards_per_team_pass_att": s.rec_yards_per_team_pass_att,
+                    "dominator_rating": s.dominator_rating,
+                    "reception_share": s.reception_share,
+                    "usage_overall": s.usage_overall,
+                    "usage_pass": s.usage_pass,
+                    "usage_rush": s.usage_rush,
+                    "usage_passing_downs": s.usage_passing_downs,
+                    "ppa_avg_overall": s.ppa_avg_overall,
+                    "ppa_avg_pass": s.ppa_avg_pass,
+                }
+                for s in season_rows
+            ]
+
+            # --- combine ---
+            comb_row = (
+                session.query(NFLCombineResult)
+                .filter(NFLCombineResult.player_id == pid)
+                .first()
+            )
+            combine = None
+            if comb_row:
+                combine = {
+                    "combine_year": comb_row.combine_year,
+                    "height_inches": comb_row.height_inches,
+                    "weight_lbs": comb_row.weight_lbs,
+                    "forty_time": comb_row.forty_time,
+                    "vertical_jump": comb_row.vertical_jump,
+                    "broad_jump": comb_row.broad_jump,
+                    "three_cone": comb_row.three_cone,
+                    "shuttle": comb_row.shuttle,
+                    "bench_press": comb_row.bench_press,
+                    "speed_score": comb_row.speed_score,
+                }
+
+            # --- draft ---
+            pick_row = (
+                session.query(NFLDraftPick)
+                .filter(NFLDraftPick.player_id == pid)
+                .first()
+            )
+            draft = None
+            if pick_row:
+                draft = {
+                    "draft_year": pick_row.draft_year,
+                    "draft_round": pick_row.draft_round,
+                    "overall_pick": pick_row.overall_pick,
+                    "nfl_team": pick_row.nfl_team,
+                    "position_drafted": pick_row.position_drafted,
+                    "draft_capital_score": pick_row.draft_capital_score,
+                }
+
+        return {
+            **identity,
+            "recruiting": recruiting,
+            "seasons": seasons,
+            "combine": combine,
+            "draft": draft,
+            "career": self.get_cfb_career(pid),
+        }
 
     # ------------------------------------------------------------------
     # Utility

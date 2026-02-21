@@ -8,6 +8,7 @@ from datetime import date
 from typing import Generator
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     Float,
@@ -46,6 +47,8 @@ class Player(Base):
 
     seasons = relationship("CFBPlayerSeason", back_populates="player", cascade="all, delete-orphan")
     recruiting = relationship("Recruiting", back_populates="player", cascade="all, delete-orphan")
+    draft_pick = relationship("NFLDraftPick", back_populates="player", uselist=False, cascade="all, delete-orphan")
+    combine = relationship("NFLCombineResult", back_populates="player", uselist=False, cascade="all, delete-orphan")
 
     def get_name_variants(self) -> list[str]:
         return json.loads(self.name_variants or "[]")
@@ -147,8 +150,10 @@ class CFBTeamSeason(Base):
     total_rush_yards = Column(Integer)
 
     # Strength metrics (from CFBD RatingsApi)
-    sp_plus_rating = Column(Float)
-    sos_rating = Column(Float)       # Strength of schedule
+    sp_plus_rating = Column(Float)    # SP+ overall rating (Bill Connelly)
+    sos_rating = Column(Float)        # SP+ SOS — null from API, reserved for future use
+    srs_rating = Column(Float)        # Simple Rating System (margin + schedule)
+    fpi_sos_rank = Column(Integer)    # ESPN FPI strength-of-schedule rank (lower = harder)
 
     def __repr__(self) -> str:
         return f"<CFBTeamSeason team={self.team!r} year={self.season_year}>"
@@ -179,6 +184,65 @@ class Recruiting(Base):
 
     def __repr__(self) -> str:
         return f"<Recruiting player_id={self.player_id} year={self.recruit_year} stars={self.stars}>"
+
+
+class NFLDraftPick(Base):
+    """
+    NFL Draft pick record for a player.
+    One row per player (players are only drafted once).
+    """
+
+    __tablename__ = "nfl_draft_picks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False, unique=True)
+    draft_year = Column(Integer)
+    draft_round = Column(Integer)
+    overall_pick = Column(Integer)       # Overall pick number (1 = first overall)
+    nfl_team = Column(String)
+    position_drafted = Column(String)
+
+    # Draft capital score: a normalized 0–100 value derived from overall_pick.
+    # Higher = better draft capital. Computed externally and stored here.
+    draft_capital_score = Column(Float)
+
+    player = relationship("Player", back_populates="draft_pick")
+
+    def __repr__(self) -> str:
+        return f"<NFLDraftPick player_id={self.player_id} year={self.draft_year} pick={self.overall_pick}>"
+
+
+class NFLCombineResult(Base):
+    """
+    NFL Combine measurables for a player.
+    Source: Pro Football Reference combine data.
+    """
+
+    __tablename__ = "nfl_combine_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False, unique=True)
+    combine_year = Column(Integer)
+    college = Column(String)
+    position = Column(String)
+
+    # Measurables
+    height_inches = Column(Float)    # Height at combine (inches)
+    weight_lbs = Column(Float)       # Weight at combine (lbs)
+    forty_time = Column(Float)       # 40-yard dash (seconds)
+    vertical_jump = Column(Float)    # Vertical jump (inches)
+    broad_jump = Column(Integer)     # Broad jump (inches)
+    three_cone = Column(Float)       # 3-cone drill (seconds)
+    shuttle = Column(Float)          # 20-yard shuttle (seconds)
+    bench_press = Column(Integer)    # Bench press reps (225 lbs)
+
+    # Derived
+    speed_score = Column(Float)      # Bill Barnwell Speed Score: (weight * 200) / (40_time^4)
+
+    player = relationship("Player", back_populates="combine")
+
+    def __repr__(self) -> str:
+        return f"<NFLCombineResult player_id={self.player_id} year={self.combine_year} forty={self.forty_time}>"
 
 
 # ---------------------------------------------------------------------------
