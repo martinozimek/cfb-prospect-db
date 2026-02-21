@@ -15,7 +15,6 @@ All operations are idempotent (safe to re-run).
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -23,12 +22,11 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rapidfuzz import fuzz, process
-
 from config import get_api_key, get_db_path
 from ffdb.collectors.cfbd_collector import CFBDCollector
 from ffdb.collectors.pfr_collector import NFLVerseCollector
 from ffdb.database import (
+    CFBPlayerSeason,
     CFBTeamSeason,
     NFLCombineResult,
     NFLDraftPick,
@@ -36,6 +34,7 @@ from ffdb.database import (
     get_session,
     init_db,
 )
+from ffdb.utils.player_index import PlayerIndex
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,61 +55,6 @@ def _safe_int(val) -> Optional[int]:
     try:
         return int(val) if val is not None else None
     except (TypeError, ValueError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Fast in-memory player index (built once, reused for all matching)
-# ---------------------------------------------------------------------------
-
-class PlayerIndex:
-    """
-    Loads all players from the DB into memory once and provides fast
-    exact + fuzzy name matching without repeated DB queries.
-    """
-
-    def __init__(self, db_path: str):
-        self._players: dict[int, Player] = {}          # id → Player (detached)
-        self._exact: dict[str, int] = {}               # lowercase name → player_id
-        self._candidates: list[tuple[str, int]] = []   # (name, player_id) for fuzzy
-
-        with get_session(db_path) as session:
-            for p in session.query(Player).all():
-                self._players[p.id] = Player(
-                    id=p.id,
-                    cfbd_id=p.cfbd_id,
-                    full_name=p.full_name,
-                    position=p.position,
-                    height_inches=p.height_inches,
-                    weight_lbs=p.weight_lbs,
-                )
-                lower = p.full_name.lower()
-                self._exact[lower] = p.id
-                self._candidates.append((p.full_name, p.id))
-                for variant in json.loads(p.name_variants or "[]"):
-                    self._exact[variant.lower()] = p.id
-                    self._candidates.append((variant, p.id))
-
-        logger.info("PlayerIndex built: %d players, %d name candidates.",
-                    len(self._players), len(self._candidates))
-
-    def find(self, name: str, threshold: int = 85) -> Optional[int]:
-        """Return player_id for best match, or None if below threshold."""
-        if not name:
-            return None
-        # Exact match first (fast path)
-        pid = self._exact.get(name.lower())
-        if pid is not None:
-            return pid
-        # Fuzzy match
-        if not self._candidates:
-            return None
-        names = [c[0] for c in self._candidates]
-        pids  = [c[1] for c in self._candidates]
-        result = process.extractOne(name, names, scorer=fuzz.WRatio)
-        if result and result[1] >= threshold:
-            idx = names.index(result[0])
-            return pids[idx]
         return None
 
 
@@ -221,6 +165,28 @@ def ingest_draft(
             pick.nfl_team          = row.get("nfl_team")
             pick.position_drafted  = row.get("position")
             pick.draft_capital_score = row.get("draft_capital_score")
+
+            # Derive approximate DOB from age-at-draft so we can compute
+            # age_at_season_start for college seasons.
+            # nflverse age = age on April 1 of draft year (NFL convention).
+            # Approximate: player turns `age` in calendar year (draft_year - age + 1
+            # before April, draft_year - age after April). We use July 1 as midpoint.
+            age_at_draft = row.get("age_at_draft")
+            if age_at_draft and not player.date_of_birth:
+                from datetime import date as _date
+                birth_year = year - int(age_at_draft)
+                player.date_of_birth = _date(birth_year, 7, 1)
+
+                # Back-fill age_at_season_start for all existing seasons
+                dob = player.date_of_birth
+                for s in session.query(CFBPlayerSeason).filter(
+                    CFBPlayerSeason.player_id == pid
+                ).all():
+                    sep1 = _date(s.season_year, 9, 1)
+                    s.age_at_season_start = round(
+                        (sep1 - dob).days / 365.25, 2
+                    )
+
             matched += 1
 
     logger.info("  Draft %d: matched %d / %d (skipped %d unrecognized)",
@@ -361,8 +327,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--strength-years", type=int, nargs="+",
-        default=list(range(2021, 2025)),
-        help="Years to fetch FPI SOS + SRS for (default: 2021-2024)",
+        default=list(range(2021, 2026)),
+        help="Years to fetch FPI SOS + SRS for (default: 2021-2025)",
     )
     parser.add_argument("--skip-combine",  action="store_true")
     parser.add_argument("--skip-draft",    action="store_true")

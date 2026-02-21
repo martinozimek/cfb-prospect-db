@@ -179,6 +179,9 @@ class NFLVerseCollector:
         rows = []
         for _, row in subset.iterrows():
             pick = row.get("pick")
+            # age column = player's age at time of draft (April of draft_year)
+            # Use it to approximate DOB: born ~(draft_year - age) in ~July
+            age_at_draft = float(row["age"]) if pd.notna(row.get("age")) else None
             rows.append({
                 "name": row.get("pfr_player_name") or "",
                 "college": row.get("college") or "",
@@ -189,6 +192,7 @@ class NFLVerseCollector:
                 "overall_pick": int(pick) if pd.notna(pick) else None,
                 "draft_capital_score": _pick_to_draft_capital(pick),
                 "nflverse_cfb_id": row.get("cfb_player_id") or "",
+                "age_at_draft": age_at_draft,
             })
 
         logger.info("  %d %s draft rows for %d", len(rows), pos_filter, year)

@@ -39,6 +39,7 @@ from ffdb.database import (
     get_session,
     init_db,
 )
+from ffdb.utils.player_index import PlayerIndex
 
 logging.basicConfig(
     level=logging.INFO,
@@ -413,42 +414,50 @@ def ingest_year(collector: CFBDCollector, db_path: str, year: int) -> None:
 # Recruiting ingestion (separate pass, keyed by name not ID)
 # ---------------------------------------------------------------------------
 
-def ingest_recruiting(collector: CFBDCollector, db_path: str, year: int) -> None:
+def ingest_recruiting(
+    collector: CFBDCollector,
+    db_path: str,
+    year: int,
+    index: PlayerIndex,
+) -> None:
+    """
+    Ingest recruiting class data for a single year.
+
+    Only links recruits to players already in the DB (matched by name).
+    Does NOT create placeholder Player rows for unmatched recruits — those
+    recruits are simply skipped (they won't have college season data anyway).
+    Uses PlayerIndex for fast in-memory matching instead of per-row DB scans.
+    """
     raw = collector.fetch_recruiting(year)
     if not raw:
         return
 
     with get_session(db_path) as session:
-        count = 0
+        matched = skipped = 0
+        seen_pids: set[int] = set()
+
         for recruit in raw:
             name = getattr(recruit, "name", None)
             if not name:
+                skipped += 1
                 continue
 
-            # Try to match to an existing player by name
-            from ffdb.utils.name_matching import find_player_one
-            try:
-                player = find_player_one(session, name, threshold=88)
-            except ValueError:
-                player = None  # ambiguous — skip auto-link
+            pid = index.find(name, threshold=88)
+            if pid is None or pid in seen_pids:
+                skipped += 1
+                continue
+            seen_pids.add(pid)
 
-            if player is None:
-                # Create a minimal player record as a placeholder
-                player = Player(full_name=name)
-                session.add(player)
-                session.flush()
-
-            # Check for existing recruiting row
             existing = (
                 session.query(Recruiting)
                 .filter(
-                    Recruiting.player_id == player.id,
+                    Recruiting.player_id == pid,
                     Recruiting.recruit_year == year,
                 )
                 .first()
             )
             if existing is None:
-                existing = Recruiting(player_id=player.id, recruit_year=year)
+                existing = Recruiting(player_id=pid, recruit_year=year)
                 session.add(existing)
 
             existing.stars = _safe_int(getattr(recruit, "stars", None))
@@ -458,9 +467,12 @@ def ingest_recruiting(collector: CFBDCollector, db_path: str, year: int) -> None
             existing.state = getattr(recruit, "state_province", None)
             existing.school = getattr(recruit, "school", None)
             existing.classification = getattr(recruit, "recruit_type", None)
-            count += 1
+            matched += 1
 
-        logger.info("  Upserted %d recruiting records for class %d", count, year)
+        logger.info(
+            "  Recruiting class %d: matched %d / %d (skipped %d unrecognized)",
+            year, matched, len(raw), skipped,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -472,12 +484,12 @@ def main() -> None:
         description="Populate the FF college football database from the CFBD API."
     )
     parser.add_argument(
-        "--start-year", type=int, default=2020,
-        help="First season year to fetch (default: 2020)"
+        "--start-year", type=int, default=2021,
+        help="First season year to fetch (default: 2021)"
     )
     parser.add_argument(
-        "--end-year", type=int, default=2024,
-        help="Last season year to fetch inclusive (default: 2024)"
+        "--end-year", type=int, default=2025,
+        help="Last season year to fetch inclusive (default: 2025)"
     )
     parser.add_argument(
         "--db", type=str, default=None,
@@ -502,10 +514,16 @@ def main() -> None:
 
     for year in range(args.start_year, args.end_year + 1):
         ingest_year(collector, db_path, year)
-        if not args.skip_recruiting:
-            # Recruiting class year is the year the player enrolled (year - 1 for typical seasons)
-            # We fetch the recruiting class corresponding to players entering that fall
-            ingest_recruiting(collector, db_path, year)
+
+    if not args.skip_recruiting:
+        # Build index AFTER all ingest_year calls so newly-added players are included
+        logger.info("Building player name index for recruiting matching...")
+        index = PlayerIndex(db_path)
+        for year in range(args.start_year, args.end_year + 1):
+            # Recruiting class year = year the player enrolled in college
+            # A player in the 2021 season was likely recruited in 2019-2021
+            # We ingest the class matching the season year as a reasonable default
+            ingest_recruiting(collector, db_path, year, index)
 
     logger.info("Done. Database saved to %s", db_path)
 
