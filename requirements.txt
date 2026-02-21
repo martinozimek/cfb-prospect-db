@@ -1,0 +1,6 @@
+cfbd>=5.11.3
+sqlalchemy>=2.0
+rapidfuzz>=3.0
+python-dotenv>=1.0
+requests>=2.31
+pandas>=2.0
