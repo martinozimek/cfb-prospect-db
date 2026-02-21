@@ -187,7 +187,7 @@ class CFBDCollector:
         logger.info("Fetching recruiting data for class of %d...", year)
         with cfbd.ApiClient(self._config) as client:
             api = self._recruiting_api(client)
-            result = self._call(api.get_recruiting_players, year=year)
+            result = self._call(api.get_recruits, year=year)
         logger.info("  Retrieved %d recruits for %d", len(result) if result else 0, year)
         return result or []
 
