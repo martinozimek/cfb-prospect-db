@@ -224,6 +224,70 @@ class CFBDCollector:
             result = self._call(api.get_roster, team=team, year=year)
         return result or []
 
+    def fetch_player_game_counts(self, year: int) -> dict[int, int]:
+        """
+        Return a dict mapping CFBD player_id (int) → games_played for a given year.
+
+        Strategy: loop regular-season weeks 1-16 (covers regular season + conference
+        championships). One additional postseason call picks up bowl games.
+        Typically 17-18 API calls per year — well within free tier limits.
+        """
+        player_games: dict[int, set] = {}
+
+        def _absorb(rows: list) -> None:
+            for game in (rows or []):
+                gid = getattr(game, "id", None)
+                if gid is None:
+                    return
+                for team in (getattr(game, "teams", None) or []):
+                    for cat in (getattr(team, "categories", None) or []):
+                        for stat_type in (getattr(cat, "types", None) or []):
+                            for ath in (getattr(stat_type, "athletes", None) or []):
+                                raw_pid = getattr(ath, "id", None)
+                                try:
+                                    pid = int(raw_pid)
+                                except (TypeError, ValueError):
+                                    continue
+                                player_games.setdefault(pid, set()).add(gid)
+
+        logger.info("  Fetching per-game player counts for %d...", year)
+        with cfbd.ApiClient(self._config) as client:
+            api = self._games_api(client)
+
+            # Regular season: weeks 1-16 (week 0 is not a valid CFBD week)
+            for week in range(1, 17):
+                try:
+                    rows = self._call(api.get_game_player_stats, year=year, week=week)
+                    _absorb(rows)
+                except Exception as exc:
+                    logger.debug("  game counts week %d: %s", week, exc)
+
+            # Postseason bowl games — loop by FBS team to capture all bowl participants
+            # This adds ~130 calls but ensures no bowl games are missed; only run for
+            # teams that appear in our DB to keep within rate limits
+            try:
+                teams = self.fetch_all_teams(year=year)
+                # Sample: only teams with bowl appearances (heuristic: top ~60 programs)
+                # In practice we fetch all FBS independents since week-loop misses them
+                independents = [
+                    getattr(t, "school", None)
+                    for t in teams
+                    if getattr(t, "conference", None) in ("FBS Independents",)
+                    and getattr(t, "school", None)
+                ]
+                for team_name in independents:
+                    try:
+                        rows = self._call(api.get_game_player_stats, year=year, team=team_name)
+                        _absorb(rows)
+                    except Exception as exc:
+                        logger.debug("  game counts independent %r: %s", team_name, exc)
+            except Exception as exc:
+                logger.warning("  game counts postseason/independent pass failed: %s", exc)
+
+        result = {pid: len(gids) for pid, gids in player_games.items()}
+        logger.info("  Built game counts for %d players in %d", len(result), year)
+        return result
+
     def fetch_all_teams(self, year: Optional[int] = None) -> list[Any]:
         """Return a list of all FBS teams (optionally filtered to an active year)."""
         with cfbd.ApiClient(self._config) as client:

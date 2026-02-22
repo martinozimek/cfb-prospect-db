@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     Date,
+    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -20,6 +21,19 @@ from sqlalchemy import (
     create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
+
+__all__ = [
+    "Base",
+    "Player",
+    "CFBPlayerSeason",
+    "CFBTeamSeason",
+    "Recruiting",
+    "NFLDraftPick",
+    "NFLCombineResult",
+    "DataIngestionLog",
+    "init_db",
+    "get_session",
+]
 
 
 class Base(DeclarativeBase):
@@ -243,6 +257,26 @@ class NFLCombineResult(Base):
 
     def __repr__(self) -> str:
         return f"<NFLCombineResult player_id={self.player_id} year={self.combine_year} forty={self.forty_time}>"
+
+
+class DataIngestionLog(Base):
+    """
+    Tracks when each data source was last ingested.
+    Used by scripts/refresh.py to detect new data and avoid redundant fetches.
+    """
+
+    __tablename__ = "data_ingestion_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, nullable=False)   # e.g. "cfbd_seasons", "nflverse_combine"
+    scope = Column(String)                    # e.g. "year=2025", "years=2021-2025"
+    last_run_utc = Column(DateTime, nullable=True)  # set explicitly at ingest time
+    rows_affected = Column(Integer)
+    status = Column(String)                   # "ok", "error", "skipped"
+    notes = Column(Text)
+
+    def __repr__(self) -> str:
+        return f"<DataIngestionLog source={self.source!r} scope={self.scope!r} status={self.status}>"
 
 
 # ---------------------------------------------------------------------------

@@ -355,9 +355,15 @@ def ingest_year(collector: CFBDCollector, db_path: str, year: int) -> None:
     raw_usage = collector.fetch_player_usage(year)
     raw_ppa = collector.fetch_player_season_ppa(year)
     raw_sp = collector.fetch_sp_plus_ratings(year)
+    game_counts = collector.fetch_player_game_counts(year)  # CFBD player_id → games_played
 
     # 2. Parse into lookup dicts
     player_stats = _parse_player_stats(raw_player_stats)
+
+    # Merge games_played from game counts (keyed by CFBD player_id)
+    for pid, count in game_counts.items():
+        if pid in player_stats:
+            player_stats[pid]["games_played"] = count
     team_stats_by_name = _parse_team_stats(raw_team_stats)
     usage_by_pid = _parse_usage(raw_usage)
     ppa_by_pid = _parse_ppa(raw_ppa)

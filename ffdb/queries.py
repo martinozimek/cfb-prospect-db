@@ -1,16 +1,50 @@
 """
 High-level query interface for the FF college football database.
 
-Usage:
+This module exposes FFDatabase — the single class you need for all queries.
+Import it via the package root:
+
     from ffdb import FFDatabase
 
-    db = FFDatabase()                        # auto-discovers ff.db via .env
-    db = FFDatabase("path/to/ff.db")        # explicit path
+    db = FFDatabase()                         # auto-discovers ff.db via .env
+    db = FFDatabase("path/to/ff.db")         # explicit path
 
-    profile = db.get_profile("Luther Burden")   # full player profile in one call
-    player  = db.find_player("Emeka Egbuka")    # returns Player ORM object
-    print(db.get_cfb_career(player.id))
-    print(db.get_player_metrics(player.id, year=2022))
+All methods manage their own sessions; no transaction handling required by
+the caller. ORM objects returned from session-bound calls are detached after
+the session closes — treat them as plain data containers (read attributes
+only; do not try to lazy-load relationships).
+
+Method summary
+--------------
+Player lookup
+    find_player(name)               → Player | None  (fuzzy, raises on ambiguity)
+    find_players(name)              → list[(Player, score)]
+    get_player(player_id)           → Player | None
+    get_player_by_cfbd_id(cfbd_id)  → Player | None
+
+College seasons
+    get_cfb_seasons(player_id)      → list[CFBPlayerSeason]
+    get_cfb_season(player_id, year) → CFBPlayerSeason | None
+    get_cfb_career(player_id)       → dict  (cumulative + per-game + peaks)
+    get_player_metrics(player_id)   → list[dict]  (derived metrics per season)
+
+Search / filtering
+    search_players(position, team, min_year, max_year, min_games) → list[dict]
+    search_draft_class(year, position, max_round)                 → list[dict]
+
+Supporting data
+    get_team_season(team, year)     → CFBTeamSeason | None
+    get_recruiting(player_id)       → Recruiting | None
+    get_combine(player_id)          → dict | None
+    get_draft_pick(player_id)       → dict | None
+
+All-in-one
+    get_profile(name)               → dict | None  (full profile in one call)
+
+Utility
+    get_ingestion_status()          → list[dict]  (data freshness log)
+    add_name_variant(player_id, variant)
+    close()
 """
 
 from __future__ import annotations
@@ -24,6 +58,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ffdb.database import (
     CFBPlayerSeason,
     CFBTeamSeason,
+    DataIngestionLog,
     NFLCombineResult,
     NFLDraftPick,
     Player,
@@ -42,6 +77,13 @@ class FFDatabase:
     """
 
     def __init__(self, db_path: Optional[str] = None, create_tables: bool = True):
+        """
+        Parameters
+        ----------
+        db_path:       Path to the SQLite file. If omitted, reads FF_DB_PATH from .env.
+        create_tables: Create schema tables if they don't exist (default True).
+                       Set to False if you are certain the DB is already initialized.
+        """
         if db_path is None:
             import sys
             from pathlib import Path
@@ -399,15 +441,21 @@ class FFDatabase:
         max_round: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """
-        Return all drafted WR/RB/TE players from a given draft year.
+        Return all drafted players from a given draft year, sorted by overall pick.
 
         Parameters
         ----------
         year:      Draft year (e.g. 2024).
-        position:  Filter to 'WR', 'RB', or 'TE' (optional).
+        position:  Filter to a single position, e.g. 'WR', 'RB', 'TE' (optional).
+                   If omitted, all skill positions in the DB are returned.
         max_round: Only return picks up to and including this round (optional).
 
-        Each dict includes player identity + draft info, sorted by overall_pick.
+        Returns
+        -------
+        list of dicts, each containing:
+            player_id, full_name, position, draft_year, draft_round,
+            overall_pick, nfl_team, draft_capital_score,
+            height_inches, weight_lbs
         """
         with self._Session() as session:
             q = (
@@ -582,12 +630,50 @@ class FFDatabase:
     # Utility
     # ------------------------------------------------------------------
 
+    def get_ingestion_status(self) -> list[dict[str, Any]]:
+        """
+        Return the data ingestion log — when each source was last refreshed.
+
+        Each row in the returned list is a dict with:
+            source, scope, last_run_utc, rows_affected, status, notes
+
+        Useful for checking whether the database is up to date before running
+        analysis. To refresh stale sources, run:
+            python scripts/refresh.py --check   # non-destructive check
+            python scripts/refresh.py           # smart incremental refresh
+        """
+        with self._Session() as session:
+            rows = (
+                session.query(DataIngestionLog)
+                .order_by(
+                    DataIngestionLog.source,
+                    DataIngestionLog.scope,
+                    DataIngestionLog.last_run_utc.desc(),
+                )
+                .all()
+            )
+            # Return only the most recent entry per (source, scope) pair
+            seen: dict[tuple, dict] = {}
+            for r in rows:
+                key = (r.source, r.scope)
+                if key not in seen:
+                    seen[key] = {
+                        "source": r.source,
+                        "scope": r.scope,
+                        "last_run_utc": r.last_run_utc,
+                        "rows_affected": r.rows_affected,
+                        "status": r.status,
+                        "notes": r.notes,
+                    }
+        return list(seen.values())
+
     def add_name_variant(self, player_id: int, variant: str) -> None:
-        """Register an alternate name spelling for a player."""
+        """Register an alternate name spelling for a player (persists to DB)."""
         from ffdb.utils.name_matching import add_name_variant as _add
         with self._Session() as session:
             _add(session, player_id, variant)
             session.commit()
 
     def close(self) -> None:
+        """Dispose the underlying connection pool. Call when done in long-running scripts."""
         self._engine.dispose()
