@@ -58,6 +58,7 @@ class Player(Base):
     hometown = Column(String)
     home_state = Column(String)
     name_variants = Column(Text, default="[]")  # JSON array of alternate spellings
+    declared_draft_year = Column(Integer, nullable=True)  # e.g. 2026 when player declares for draft
 
     seasons = relationship("CFBPlayerSeason", back_populates="player", cascade="all, delete-orphan")
     recruiting = relationship("Recruiting", back_populates="player", cascade="all, delete-orphan")
@@ -283,10 +284,32 @@ class DataIngestionLog(Base):
 # Database helpers
 # ---------------------------------------------------------------------------
 
+def _migrate(engine) -> None:
+    """
+    Add missing columns to existing tables (forward-only SQLite migration).
+    Safe to run on a fresh DB or an existing one.
+    """
+    from sqlalchemy import text
+
+    migrations = [
+        ("players", "declared_draft_year", "INTEGER"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in migrations:
+            result = conn.execute(text(f"PRAGMA table_info({table})"))
+            existing = {row[1] for row in result}
+            if col not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                ))
+        conn.commit()
+
+
 def init_db(db_path: str) -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, then apply forward migrations."""
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     engine.dispose()
 
 

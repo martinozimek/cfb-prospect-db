@@ -181,7 +181,7 @@ def build_teammate_score_map(db_path: str) -> dict[str, float]:
 
 # ─── Core computation ─────────────────────────────────────────────────────────
 
-def compute_components(db_path: str, last_season: int) -> pd.DataFrame:
+def compute_components(db_path: str, last_season: int, declared_only: bool = False) -> pd.DataFrame:
     """
     Return a DataFrame of ZAP component inputs for all WR/RB/TE players
     who had a `last_season` season entry in the DB.
@@ -192,16 +192,17 @@ def compute_components(db_path: str, last_season: int) -> pd.DataFrame:
     with get_session(db_path) as session:
 
         # Players with a qualifying season in `last_season`
-        prospects = (
+        q = (
             session.query(Player)
             .join(CFBPlayerSeason, CFBPlayerSeason.player_id == Player.id)
             .filter(
                 CFBPlayerSeason.season_year == last_season,
                 Player.position.in_(list(POSITIONS)),
             )
-            .distinct()
-            .all()
         )
+        if declared_only:
+            q = q.filter(Player.declared_draft_year == last_season + 1)
+        prospects = q.distinct().all()
 
         logger.info(
             "Processing %d WR/RB/TE prospects with a %d season...",
@@ -480,12 +481,20 @@ def main() -> None:
         "--output", type=str, default=None,
         help="Optional CSV output path (e.g. zap_2026.csv).",
     )
+    parser.add_argument(
+        "--declared-only", action="store_true",
+        help="Only include players with declared_draft_year == season+1 in the DB.",
+    )
     args = parser.parse_args()
 
     db_path = args.db or get_db_path()
 
-    logger.info("Computing ZAP component sheet for %d draft class...", args.season + 1)
-    df = compute_components(db_path, last_season=args.season)
+    logger.info(
+        "Computing ZAP component sheet for %d draft class%s...",
+        args.season + 1,
+        " (declared only)" if args.declared_only else "",
+    )
+    df = compute_components(db_path, last_season=args.season, declared_only=args.declared_only)
 
     if df.empty:
         logger.error("No data returned. Check DB path and season year.")
