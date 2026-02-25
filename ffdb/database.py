@@ -30,6 +30,7 @@ __all__ = [
     "Recruiting",
     "NFLDraftPick",
     "NFLCombineResult",
+    "PFFPlayerSeason",
     "DataIngestionLog",
     "init_db",
     "get_session",
@@ -64,6 +65,7 @@ class Player(Base):
     recruiting = relationship("Recruiting", back_populates="player", cascade="all, delete-orphan")
     draft_pick = relationship("NFLDraftPick", back_populates="player", uselist=False, cascade="all, delete-orphan")
     combine = relationship("NFLCombineResult", back_populates="player", uselist=False, cascade="all, delete-orphan")
+    pff_seasons = relationship("PFFPlayerSeason", back_populates="player", cascade="all, delete-orphan")
 
     def get_name_variants(self) -> list[str]:
         return json.loads(self.name_variants or "[]")
@@ -258,6 +260,77 @@ class NFLCombineResult(Base):
 
     def __repr__(self) -> str:
         return f"<NFLCombineResult player_id={self.player_id} year={self.combine_year} forty={self.forty_time}>"
+
+
+class PFFPlayerSeason(Base):
+    """
+    PFF (Pro Football Focus) college player season metrics.
+    Source: PFF+ subscription data export (CSV).
+
+    Coverage target: WR/RB/TE seasons 2014–present.
+    Populate via: scripts/populate_pff.py --csv <path-to-export.csv>
+
+    Key metrics not available from free sources:
+    - yprr: yards per route run (JJ Zachariason's primary WR efficiency metric)
+    - receiving_grade: PFF 0-100 receiving grade
+    - contested_catch_rate: won / (won + lost) on contested targets
+    - drop_rate: drops / targets
+    - target_separation: avg yards of separation at time of target (Next Gen Stats proxy)
+    """
+
+    __tablename__ = "pff_player_seasons"
+    __table_args__ = (
+        UniqueConstraint("player_id", "season_year", name="uq_pff_player_season"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=False)
+    season_year = Column(Integer, nullable=False)
+    team = Column(String)
+    position = Column(String)
+
+    # --- Volume ---
+    routes_run = Column(Integer)        # total routes run (pass plays where player released)
+    targets = Column(Integer)           # actual target count from PFF charting
+    receptions = Column(Integer)
+    rec_yards = Column(Integer)
+    rec_tds = Column(Integer)
+    games_played = Column(Integer)
+
+    # --- Efficiency ---
+    yprr = Column(Float)               # yards per route run (rec_yards / routes_run)
+    yards_per_target = Column(Float)   # rec_yards / targets
+    yards_per_reception = Column(Float)
+    catch_rate = Column(Float)         # receptions / targets
+    td_rate = Column(Float)            # rec_tds / targets
+
+    # --- Grades ---
+    receiving_grade = Column(Float)    # PFF receiving grade (0–100)
+    route_grade = Column(Float)        # PFF route running grade (0–100)
+
+    # --- Quality / Separation ---
+    target_separation = Column(Float)  # avg yards of separation at snap-to-throw
+    avg_depth_of_target = Column(Float)  # ADOT (avg intended air yards per target)
+    yards_after_catch = Column(Float)  # YAC total
+    yac_per_rec = Column(Float)        # yards after catch per reception
+
+    # --- Discipline ---
+    drops = Column(Integer)
+    drop_rate = Column(Float)          # drops / targets
+
+    # --- Contested ---
+    contested_targets = Column(Integer)
+    contested_catches = Column(Integer)
+    contested_catch_rate = Column(Float)  # contested_catches / contested_targets
+
+    # --- Derived (computed on ingest) ---
+    # routes_per_game = routes_run / games_played (stored for convenience)
+    routes_per_game = Column(Float)
+
+    player = relationship("Player", back_populates="pff_seasons")
+
+    def __repr__(self) -> str:
+        return f"<PFFPlayerSeason player_id={self.player_id} year={self.season_year} yprr={self.yprr}>"
 
 
 class DataIngestionLog(Base):
