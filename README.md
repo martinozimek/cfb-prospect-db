@@ -38,6 +38,177 @@ python scripts/refresh.py --source=combine --years 2026   # single source
 
 ---
 
+## Quick Start — 5-minute tour
+
+```python
+from ffdb import FFDatabase
+db = FFDatabase()   # reads FF_DB_PATH from .env automatically
+
+# 1. Look up any player by name (fuzzy — typos are fine)
+profile = db.get_profile("Emeka Egbuka")
+print(profile["position"])          # WR
+print(profile["career"]["peak_dominator_rating"])   # 0.42
+print(profile["combine"]["speed_score"])            # 103.7
+print(profile["draft"]["draft_capital_score"])      # 81.2
+
+# 2. Find all WRs drafted 2023 in the first 2 rounds
+picks = db.search_draft_class(year=2023, position="WR", max_round=2)
+for p in picks:
+    print(p["full_name"], p["overall_pick"])
+
+# 3. Get season-by-season stats for a player
+player = db.find_player("CJ Stroud")  # QB fine too
+seasons = db.get_cfb_seasons(player.id)
+for s in seasons:
+    print(s.season_year, s.team, f"{s.rec_yards or s.pass_yards} yds")
+
+# 4. Compare dominator ratings across the 2026 WR class
+wrs = db.search_players(position="WR", min_year=2025, min_games=6)
+for w in wrs:
+    m = db.get_player_metrics(w["player_id"])
+    best = max((x["dominator_rating"] or 0 for x in m), default=0)
+    print(f"{w['full_name']:25s}  dominator={best:.3f}")
+```
+
+---
+
+## Quick Plots
+
+```python
+import matplotlib.pyplot as plt
+import pandas as pd
+from ffdb import FFDatabase
+db = FFDatabase()
+```
+
+### Plot 1 — Dominator rating vs. draft capital (2018–2022 WRs)
+
+```python
+picks = db.search_draft_class(year=2020, position="WR")
+rows = []
+for p in picks:
+    m  = db.get_player_metrics(p["player_id"])
+    dp = db.get_draft_pick(p["player_id"])
+    if not m or not dp:
+        continue
+    best_dom = max((x["dominator_rating"] or 0 for x in m), default=0)
+    rows.append({"name": p["full_name"],
+                 "dominator": best_dom,
+                 "draft_capital": dp["draft_capital_score"]})
+
+df = pd.DataFrame(rows).dropna()
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.scatter(df["dominator"], df["draft_capital"], s=60, alpha=0.7)
+for _, r in df.iterrows():
+    ax.annotate(r["name"].split()[-1], (r["dominator"], r["draft_capital"]),
+                fontsize=7, xytext=(3, 2), textcoords="offset points")
+ax.set_xlabel("Best College Dominator Rating")
+ax.set_ylabel("Draft Capital Score (0–100)")
+ax.set_title("WR Dominator vs. Draft Capital — 2020 Class")
+plt.tight_layout()
+plt.savefig("dominator_vs_capital.png", dpi=150)
+plt.show()
+```
+
+### Plot 2 — Age progression chart for a single prospect
+
+```python
+player = db.find_player("Tetairoa McMillan")
+metrics = db.get_player_metrics(player.id)
+
+years  = [m["season_year"] for m in metrics]
+dom    = [m["dominator_rating"] or 0 for m in metrics]
+ages   = [m["age_at_season_start"] or 0 for m in metrics]
+rec_rate = [m["rec_yards_per_team_pass_att"] or 0 for m in metrics]
+
+fig, ax1 = plt.subplots(figsize=(7, 4))
+ax2 = ax1.twinx()
+ax1.bar(years, dom, alpha=0.5, color="steelblue", label="Dominator Rating")
+ax2.plot(years, rec_rate, "o-", color="tomato", label="Rec Rate (YPTA)")
+ax1.set_xlabel("Season")
+ax1.set_ylabel("Dominator Rating", color="steelblue")
+ax2.set_ylabel("Rec Yds / Team Pass Att", color="tomato")
+ax1.set_title(f"{player.full_name} — Season-by-Season Profile  (age at start shown)")
+for y, yr, ag in zip(dom, years, ages):
+    ax1.text(yr, y + 0.005, f"age {ag:.1f}", ha="center", fontsize=7)
+fig.legend(loc="upper left", bbox_to_anchor=(0.12, 0.88))
+plt.tight_layout()
+plt.savefig("player_profile.png", dpi=150)
+plt.show()
+```
+
+### Plot 3 — Speed score distribution by position (2024 combine class)
+
+```python
+from ffdb import NFLCombineResult
+from ffdb.database import get_session
+from config import get_db_path
+
+with get_session(get_db_path()) as s:
+    rows = s.query(NFLCombineResult).filter(
+        NFLCombineResult.combine_year == 2024,
+        NFLCombineResult.position.in_(["WR", "RB", "TE"]),
+        NFLCombineResult.speed_score.isnot(None),
+    ).all()
+
+df = pd.DataFrame([{
+    "position": r.position,
+    "speed_score": r.speed_score,
+    "forty_time": r.forty_time,
+} for r in rows])
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=False)
+for ax, pos in zip(axes, ["WR", "RB", "TE"]):
+    sub = df[df["position"] == pos]["speed_score"].dropna()
+    ax.hist(sub, bins=15, color={"WR": "steelblue", "RB": "tomato", "TE": "seagreen"}[pos],
+            alpha=0.8, edgecolor="white")
+    ax.axvline(sub.mean(), color="black", linestyle="--", linewidth=1)
+    ax.set_title(f"{pos}  (n={len(sub)}, mean={sub.mean():.1f})")
+    ax.set_xlabel("Speed Score")
+    ax.set_ylabel("Count")
+fig.suptitle("Speed Score Distribution by Position — 2024 Combine", fontweight="bold")
+plt.tight_layout()
+plt.savefig("speed_score_dist.png", dpi=150)
+plt.show()
+```
+
+### Plot 4 — Export any cohort to pandas for custom analysis
+
+```python
+# All skill-position seasons from 2020–2025 with 6+ games → DataFrame
+wrs = db.search_players(position="WR", min_year=2020, min_games=6)
+
+rows = []
+for w in wrs:
+    for m in db.get_player_metrics(w["player_id"]):
+        if m["season_year"] < 2020:
+            continue
+        rows.append({"name": w["full_name"], **m})
+
+df = pd.DataFrame(rows)
+df.to_csv("wr_seasons_2020_2025.csv", index=False)
+print(df[["name", "season_year", "dominator_rating",
+          "rec_yards_per_team_pass_att", "ppa_avg_pass"]].head(20))
+```
+
+---
+
+## Data coverage (current DB)
+
+| Source | Coverage | Notes |
+|---|---|---|
+| College seasons | 2007–2025 (~150k rows) | 100% games_played |
+| Draft picks (WR/RB/TE) | 2011–2025 (1,071 rows) | 100% |
+| NFL combine | 2011–2025 (1,503 rows) | ~76–79% of drafted players |
+| `dominator_rating`, `rec_yards_per_team_pass_att` | 100% for 2014+ | Sparse pre-2014 (CFBD API gap) |
+| `ppa_avg_pass`, `usage_overall` | ~73% for WR (2015+) | CFBD gap 2011-2014 |
+| `three_cone`, `shuttle` | ~50% of combine attendees | Players who ran the drill |
+| Recruiting (247Sports) | 2018–2025 | 2011–2017 blocked until March 2026 CFBD quota reset |
+| `consensus_rank` (big board) | 2016–2026 | No free source pre-2016 |
+| College `targets` | Not reliably tracked | CFBD does not consistently report targets; `reception_share` is the proxy |
+
+---
+
 ## Python library usage
 
 ```python
