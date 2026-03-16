@@ -51,6 +51,7 @@ from ffdb.database import (
     NFLDraftPick,
     NFLCombineResult,
     PFFPlayerSeason,
+    PFFQBSeason,
     Recruiting,
     DataIngestionLog,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "NFLDraftPick",
     "NFLCombineResult",
     "PFFPlayerSeason",
+    "PFFQBSeason",
     "Recruiting",
     "DataIngestionLog",
 ]

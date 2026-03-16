@@ -1,82 +1,123 @@
 """
-CFBD API data collector.
+CFBD API data collector using direct HTTP requests.
 
-Wraps the official cfbd Python client to fetch player and team data
-for bulk ingestion into the local SQLite database.
+Replaces the official cfbd Python package which has pydantic v2 incompatibilities.
+Returns SimpleNamespace objects that mirror the cfbd package's attribute names so
+that all downstream parsing code (populate_db.py, etc.) works without changes.
 
 API documentation: https://apinext.collegefootballdata.com
-Python client:     pip install cfbd
 """
 
 import logging
+import re
 import time
+import types
 from typing import Any, Optional
 
-import cfbd
-from cfbd.rest import ApiException
+import requests
 
 logger = logging.getLogger(__name__)
 
+_BASE_URL = "https://apinext.collegefootballdata.com"
+
+
+# ---------------------------------------------------------------------------
+# camelCase → snake_case converter
+# ---------------------------------------------------------------------------
+
+def _snake(name: str) -> str:
+    """Convert camelCase / PascalCase to snake_case, handling acronyms."""
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    return s.lower()
+
+
+# Rename overrides applied *after* snake_case conversion.
+# "stat_value" → "stat":  team stats statValue is a raw number from the API;
+#                          populate_db._parse_team_stats falls back to row.stat.
+# "pass" → "var_pass":    `pass` is a Python keyword; cfbd package uses var_pass.
+_FIELD_OVERRIDES: dict[str, str] = {
+    "stat_value": "stat",
+    "pass": "var_pass",
+}
+
+
+def _to_ns(obj: Any) -> Any:
+    """Recursively convert dict/list to SimpleNamespace with snake_case keys."""
+    if isinstance(obj, dict):
+        d: dict[str, Any] = {}
+        for k, v in obj.items():
+            key = _snake(k)
+            key = _FIELD_OVERRIDES.get(key, key)
+            d[key] = _to_ns(v)
+        return types.SimpleNamespace(**d)
+    elif isinstance(obj, list):
+        return [_to_ns(item) for item in obj]
+    else:
+        return obj
+
+
+# ---------------------------------------------------------------------------
+# Thin ApiException to match the cfbd package's interface
+# ---------------------------------------------------------------------------
+
+class ApiException(Exception):
+    def __init__(self, status: int, message: str = ""):
+        self.status = status
+        self.message = message
+        super().__init__(f"API error {status}: {message}")
+
+
+# ---------------------------------------------------------------------------
+# Collector
+# ---------------------------------------------------------------------------
 
 class CFBDCollector:
     """
-    Fetches college football data from the CFBD API.
+    Fetches college football data from the CFBD API via direct HTTP requests.
 
-    All methods return raw cfbd model objects (or dicts). Parsing and
-    DB insertion are handled by the populate script to keep concerns
-    separated.
+    Returns SimpleNamespace objects (attribute-access compatible with the old
+    cfbd Python package) so downstream parsing code needs no changes.
     """
 
     def __init__(self, api_key: str, request_delay: float = 0.25):
-        """
-        Parameters
-        ----------
-        api_key:       Bearer token from collegefootballdata.com.
-        request_delay: Seconds to wait between API calls (courtesy throttle).
-        """
-        self._config = cfbd.Configuration(access_token=api_key)
         self._delay = request_delay
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _players_api(self, client: cfbd.ApiClient) -> cfbd.PlayersApi:
-        return cfbd.PlayersApi(client)
-
-    def _stats_api(self, client: cfbd.ApiClient) -> cfbd.StatsApi:
-        return cfbd.StatsApi(client)
-
-    def _metrics_api(self, client: cfbd.ApiClient) -> cfbd.MetricsApi:
-        return cfbd.MetricsApi(client)
-
-    def _ratings_api(self, client: cfbd.ApiClient) -> cfbd.RatingsApi:
-        return cfbd.RatingsApi(client)
-
-    def _recruiting_api(self, client: cfbd.ApiClient) -> cfbd.RecruitingApi:
-        return cfbd.RecruitingApi(client)
-
-    def _games_api(self, client: cfbd.ApiClient) -> cfbd.GamesApi:
-        return cfbd.GamesApi(client)
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        })
 
     def _sleep(self) -> None:
         time.sleep(self._delay)
 
-    def _call(self, fn, *args, **kwargs) -> Any:
-        """Call an API method with basic retry on transient errors."""
+    def _get(self, path: str, params: dict | None = None) -> list[Any]:
+        """GET request with retry on 429/503. Returns list of SimpleNamespace."""
+        url = f"{_BASE_URL}{path}"
         for attempt in range(3):
             try:
-                result = fn(*args, **kwargs)
-                self._sleep()
-                return result
-            except ApiException as exc:
-                if exc.status in (429, 503) and attempt < 2:
+                resp = self._session.get(url, params=params or {}, timeout=30)
+                if resp.status_code in (429, 503) and attempt < 2:
                     wait = 10 * (attempt + 1)
-                    logger.warning("Rate limited (status %s). Waiting %ds...", exc.status, wait)
+                    logger.warning(
+                        "Rate limited (status %s). Waiting %ds...", resp.status_code, wait
+                    )
                     time.sleep(wait)
+                    continue
+                if resp.status_code != 200:
+                    raise ApiException(resp.status_code, resp.text[:300])
+                content_type = resp.headers.get("content-type", "")
+                if "json" not in content_type:
+                    raise ApiException(0, f"Non-JSON response ({content_type}): {resp.text[:100]}")
+                data = resp.json()
+                self._sleep()
+                return _to_ns(data)
+            except requests.RequestException as exc:
+                if attempt < 2:
+                    time.sleep(5)
                 else:
-                    raise
-        return None  # unreachable
+                    raise ApiException(0, str(exc))
+        return []
 
     # ------------------------------------------------------------------
     # Player season statistics
@@ -85,16 +126,11 @@ class CFBDCollector:
     def fetch_player_season_stats(self, year: int) -> list[Any]:
         """
         Fetch all individual player season stats for a given year.
-        Returns a list of PlayerSeasonStat objects from the CFBD API.
-
-        Each object has attributes: season, player_id, player, team, conference,
-        category, stat_type, stat.
+        Returns SimpleNamespace objects with attributes:
+          player_id, player, team, conference, category, stat_type, stat.
         """
         logger.info("Fetching player season stats for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._stats_api(client)
-            # Fetch multiple stat categories in one call (API returns all if no category filter)
-            result = self._call(api.get_player_season_stats, year=year)
+        result = self._get("/stats/player/season", {"year": year})
         logger.info("  Retrieved %d player-stat rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -105,13 +141,12 @@ class CFBDCollector:
     def fetch_team_season_stats(self, year: int) -> list[Any]:
         """
         Fetch team-level season statistics for a given year.
-        Used to compute denominators (team pass attempts, team receptions, etc.).
-        Returns a list of TeamSeasonStat objects.
+        Returns SimpleNamespace objects with attributes: team, stat_name, stat.
+        Note: statValue from the API is mapped to `stat` (not stat_value) so that
+        populate_db._parse_team_stats picks it up via its fallback path.
         """
         logger.info("Fetching team season stats for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._stats_api(client)
-            result = self._call(api.get_team_stats, year=year)
+        result = self._get("/stats/season", {"year": year})
         logger.info("  Retrieved %d team-stat rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -121,17 +156,15 @@ class CFBDCollector:
 
     def fetch_player_usage(self, year: int, exclude_garbage_time: bool = True) -> list[Any]:
         """
-        Fetch player usage metrics (snap-count share by down/situation) for a year.
-        Returns a list of PlayerUsage objects.
+        Fetch player usage metrics for a year.
+        Returns SimpleNamespace objects with attributes:
+          id, usage.overall, usage.var_pass, usage.rush, usage.first_down, etc.
         """
         logger.info("Fetching player usage for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._players_api(client)
-            result = self._call(
-                api.get_player_usage,
-                year=year,
-                exclude_garbage_time=exclude_garbage_time,
-            )
+        result = self._get("/player/usage", {
+            "year": year,
+            "excludeGarbageTime": "true" if exclude_garbage_time else "false",
+        })
         logger.info("  Retrieved %d usage rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -145,17 +178,15 @@ class CFBDCollector:
         exclude_garbage_time: bool = True,
     ) -> list[Any]:
         """
-        Fetch per-player season PPA (Predicted Points Added) for a year.
-        Returns a list of PlayerSeasonPpa objects.
+        Fetch per-player season PPA for a year.
+        Returns SimpleNamespace objects with:
+          id, average_ppa.all, average_ppa.var_pass, average_ppa.rush.
         """
         logger.info("Fetching player season PPA for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._metrics_api(client)
-            result = self._call(
-                api.get_predicted_points_added_by_player_season,
-                year=year,
-                exclude_garbage_time=exclude_garbage_time,
-            )
+        result = self._get("/ppa/players/season", {
+            "year": year,
+            "excludeGarbageTime": "true" if exclude_garbage_time else "false",
+        })
         logger.info("  Retrieved %d PPA rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -165,13 +196,11 @@ class CFBDCollector:
 
     def fetch_sp_plus_ratings(self, year: int) -> list[Any]:
         """
-        Fetch SP+ ratings by team for a year (used for strength-of-schedule context).
-        Returns a list of TeamSPRating objects.
+        Fetch SP+ ratings by team for a year.
+        Returns SimpleNamespace objects with: team, rating, sos.
         """
         logger.info("Fetching SP+ ratings for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._ratings_api(client)
-            result = self._call(api.get_sp, year=year)
+        result = self._get("/ratings/sp", {"year": year})
         logger.info("  Retrieved %d SP+ rating rows for %d", len(result) if result else 0, year)
         return result or []
 
@@ -182,12 +211,12 @@ class CFBDCollector:
     def fetch_recruiting(self, year: int) -> list[Any]:
         """
         Fetch individual player recruiting data for a class year.
-        Returns a list of Recruit objects.
+        Returns SimpleNamespace objects with:
+          name, stars, rating, ranking, position_ranking, state_province,
+          school, recruit_type.
         """
         logger.info("Fetching recruiting data for class of %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._recruiting_api(client)
-            result = self._call(api.get_recruits, year=year)
+        result = self._get("/recruiting/players", {"year": year})
         logger.info("  Retrieved %d recruits for %d", len(result) if result else 0, year)
         return result or []
 
@@ -196,41 +225,29 @@ class CFBDCollector:
     # ------------------------------------------------------------------
 
     def search_player(self, name: str, position: Optional[str] = None) -> list[Any]:
-        """
-        Search for a player by name via the CFBD API.
-        Useful for resolving a player's CFBD ID and basic identity info.
-        Returns a list of PlayerSearchResult objects.
-        """
-        with cfbd.ApiClient(self._config) as client:
-            api = self._players_api(client)
-            kwargs: dict[str, Any] = {"search_term": name}
-            if position:
-                kwargs["position"] = position
-            result = self._call(api.search_players, **kwargs)
-        return result or []
+        """Search for a player by name."""
+        params: dict[str, Any] = {"search": name}
+        if position:
+            params["position"] = position
+        return self._get("/players", params) or []
 
     # ------------------------------------------------------------------
-    # Rosters (for player identity / DOB when available)
+    # Rosters
     # ------------------------------------------------------------------
 
     def fetch_roster(self, team: str, year: int) -> list[Any]:
-        """
-        Fetch the roster for a specific team and year.
-        Roster entries include height, weight, hometown, position.
-        """
-        with cfbd.ApiClient(self._config) as client:
-            from cfbd import TeamsApi
-            api = TeamsApi(client)
-            result = self._call(api.get_roster, team=team, year=year)
-        return result or []
+        """Fetch the roster for a specific team and year."""
+        return self._get("/teams/roster", {"team": team, "year": year}) or []
+
+    # ------------------------------------------------------------------
+    # Game-level player stats (for games_played counts)
+    # ------------------------------------------------------------------
 
     def fetch_player_game_counts(self, year: int) -> dict[int, int]:
         """
         Return a dict mapping CFBD player_id (int) → games_played for a given year.
 
-        Strategy: loop regular-season weeks 1-16 (covers regular season + conference
-        championships). One additional postseason call picks up bowl games.
-        Typically 17-18 API calls per year — well within free tier limits.
+        Strategy: loop regular-season weeks 1-16, then postseason for independents.
         """
         player_games: dict[int, set] = {}
 
@@ -251,50 +268,42 @@ class CFBDCollector:
                                 player_games.setdefault(pid, set()).add(gid)
 
         logger.info("  Fetching per-game player counts for %d...", year)
-        with cfbd.ApiClient(self._config) as client:
-            api = self._games_api(client)
 
-            # Regular season: weeks 1-16 (week 0 is not a valid CFBD week)
-            for week in range(1, 17):
+        for week in range(1, 17):
+            try:
+                rows = self._get("/games/players", {"year": year, "week": week})
+                _absorb(rows)
+            except Exception as exc:
+                logger.debug("  game counts week %d: %s", week, exc)
+
+        try:
+            teams = self.fetch_all_teams(year=year)
+            independents = [
+                getattr(t, "school", None)
+                for t in teams
+                if getattr(t, "conference", None) in ("FBS Independents",)
+                and getattr(t, "school", None)
+            ]
+            for team_name in independents:
                 try:
-                    rows = self._call(api.get_game_player_stats, year=year, week=week)
+                    rows = self._get("/games/players", {"year": year, "team": team_name})
                     _absorb(rows)
                 except Exception as exc:
-                    logger.debug("  game counts week %d: %s", week, exc)
-
-            # Postseason bowl games — loop by FBS team to capture all bowl participants
-            # This adds ~130 calls but ensures no bowl games are missed; only run for
-            # teams that appear in our DB to keep within rate limits
-            try:
-                teams = self.fetch_all_teams(year=year)
-                # Sample: only teams with bowl appearances (heuristic: top ~60 programs)
-                # In practice we fetch all FBS independents since week-loop misses them
-                independents = [
-                    getattr(t, "school", None)
-                    for t in teams
-                    if getattr(t, "conference", None) in ("FBS Independents",)
-                    and getattr(t, "school", None)
-                ]
-                for team_name in independents:
-                    try:
-                        rows = self._call(api.get_game_player_stats, year=year, team=team_name)
-                        _absorb(rows)
-                    except Exception as exc:
-                        logger.debug("  game counts independent %r: %s", team_name, exc)
-            except Exception as exc:
-                logger.warning("  game counts postseason/independent pass failed: %s", exc)
+                    logger.debug("  game counts independent %r: %s", team_name, exc)
+        except Exception as exc:
+            logger.warning("  game counts postseason/independent pass failed: %s", exc)
 
         result = {pid: len(gids) for pid, gids in player_games.items()}
         logger.info("  Built game counts for %d players in %d", len(result), year)
         return result
 
+    # ------------------------------------------------------------------
+    # Teams
+    # ------------------------------------------------------------------
+
     def fetch_all_teams(self, year: Optional[int] = None) -> list[Any]:
-        """Return a list of all FBS teams (optionally filtered to an active year)."""
-        with cfbd.ApiClient(self._config) as client:
-            from cfbd import TeamsApi
-            api = TeamsApi(client)
-            kwargs: dict[str, Any] = {}
-            if year:
-                kwargs["year"] = year
-            result = self._call(api.get_fbs_teams, **kwargs)
-        return result or []
+        """Return a list of all FBS teams."""
+        params: dict[str, Any] = {}
+        if year:
+            params["year"] = year
+        return self._get("/teams/fbs", params) or []

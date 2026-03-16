@@ -23,7 +23,6 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import get_api_key, get_db_path
-from ffdb.collectors.cfbd_collector import CFBDCollector
 from ffdb.collectors.pfr_collector import NFLVerseCollector
 from ffdb.database import (
     CFBPlayerSeason,
@@ -197,7 +196,7 @@ def ingest_draft(
 # Roster height/weight ingestion
 # ---------------------------------------------------------------------------
 
-def ingest_rosters(cfbd_col: CFBDCollector, db_path: str, year: int) -> None:
+def ingest_rosters(cfbd_col, db_path: str, year: int) -> None:
     logger.info("Ingesting rosters for %d (height/weight by CFBD ID)...", year)
 
     teams = cfbd_col.fetch_all_teams(year=year)
@@ -345,7 +344,6 @@ def main() -> None:
     index = PlayerIndex(db_path)
 
     nflverse = NFLVerseCollector()
-    cfbd_col = CFBDCollector(api_key)
 
     if not args.skip_combine:
         logger.info("=== Combine ingestion ===")
@@ -358,6 +356,8 @@ def main() -> None:
             ingest_draft(nflverse, db_path, year, index)
 
     if not args.skip_rosters:
+        from ffdb.collectors.cfbd_collector import CFBDCollector
+        cfbd_col = CFBDCollector(api_key)
         logger.info("=== Roster ingestion ===")
         for year in args.roster_years:
             ingest_rosters(cfbd_col, db_path, year)

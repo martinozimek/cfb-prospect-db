@@ -30,7 +30,6 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import get_api_key, get_db_path
-from ffdb.collectors.cfbd_collector import CFBDCollector
 from ffdb.database import (
     CFBPlayerSeason,
     CFBTeamSeason,
@@ -112,6 +111,7 @@ def _extract_team_denominators(team_stats: dict[str, Any]) -> dict[str, Optional
 
     return {
         "pass_attempts": get("passAttempts", "pass_attempts", "passingAttempts"),
+        "rush_attempts": get("rushingAttempts", "rush_attempts", "rushingCarries"),
         "total_receptions": get("passCompletions", "receptions", "passReceptions"),
         "total_rec_yards": get("netPassingYards", "passingYards", "receivingYards"),
         "total_rush_yards": get("rushingYards", "netRushingYards"),
@@ -310,6 +310,7 @@ def _upsert_team_season(session, team: str, year: int, data: dict) -> CFBTeamSea
 
     row.conference = data.get("conference")
     row.pass_attempts = data.get("pass_attempts")
+    row.rush_attempts = data.get("rush_attempts")
     row.total_receptions = data.get("total_receptions")
     row.total_rec_yards = data.get("total_rec_yards")
     row.total_rush_yards = data.get("total_rush_yards")
@@ -344,7 +345,7 @@ def _compute_derived(season: CFBPlayerSeason, team_row: Optional[CFBTeamSeason])
 # Main per-year ingestion
 # ---------------------------------------------------------------------------
 
-def ingest_year(collector: CFBDCollector, db_path: str, year: int) -> None:
+def ingest_year(collector, db_path: str, year: int) -> None:
     logger.info("=" * 60)
     logger.info("Ingesting year %d", year)
     logger.info("=" * 60)
@@ -421,7 +422,7 @@ def ingest_year(collector: CFBDCollector, db_path: str, year: int) -> None:
 # ---------------------------------------------------------------------------
 
 def ingest_recruiting(
-    collector: CFBDCollector,
+    collector,
     db_path: str,
     year: int,
     index: PlayerIndex,
@@ -516,6 +517,7 @@ def main() -> None:
     # Ensure tables exist
     init_db(db_path)
 
+    from ffdb.collectors.cfbd_collector import CFBDCollector
     collector = CFBDCollector(api_key)
 
     for year in range(args.start_year, args.end_year + 1):

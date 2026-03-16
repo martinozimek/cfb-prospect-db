@@ -68,35 +68,62 @@ REVIEW_SCORE   = 70   # >= this but < MIN_AUTO_SCORE → flag for review
 SUPPLEMENT_2026: list[tuple[str, Optional[str], Optional[str]]] = [
     # NOTE: All entries here played their LAST college season in 2025 (CFBD season_year=2025).
     # Players who declared after the 2024 college season (e.g., Cam Ward, Shedeur Sanders,
-    # Jeanty, Warren, Fannin) are 2025 NFL Draft picks and NOT included here.
+    # Warren, Fannin) are 2025 NFL Draft picks and NOT included here.
+    #
+    # NOTE: Ashton Jeanty is a 2025 draft pick (Raiders, pick 6). His declared_draft_year
+    # was incorrectly set to 2026 in a prior session and has been corrected to 2025.
+    # He does NOT belong in this list.
     #
     # This supplement adds known 2026 prospects who are likely absent from the
     # nflmockdraftdatabase board due to late indexing or board methodology.
+    #
+    # AUDIT STATUS (verified against live nflmockdraftdatabase board 2026-02-26):
+    #   ON BOARD (confirmed declared): Kaytron Allen, Eric McAlister, Chris Brazzell,
+    #       Kenyon Sadiq, Eli Stowers, Michael Trigg, Tanner Koziol, Carsen Ryan
+    #   NOT ON BOARD (unverified — confirm each player actually declared before keeping):
+    #       Ahmad Hardy, Kewan Lacy, Bo Jackson, Mark Fletcher, Nate Frazier,
+    #       Jordan Marshall, Malachi Toney, Duce Robinson, Cam Coleman
+    #   REMOVED (confirmed did NOT declare):
+    #       Jeremiah Smith (Ohio State WR) — chose to return for 2026 college season
 
-    # ── Running Backs (2025 college season confirmed in cfb DB) ──────────────
-    ("Ahmad Hardy",     "RB", "Missouri"),         # 1649 rush yds, top non-board RB
-    ("Kewan Lacy",      "RB", "Ole Miss"),          # 1567 rush yds
-    ("Bo Jackson",      "RB", "Ohio State"),        # 1090 rush yds, OSU
-    ("Mark Fletcher",   "RB", "Miami"),             # 1192 rush yds
-    ("Kaytron Allen",   "RB", "Penn State"),        # 1303 rush yds (on board #119, safety net)
-    ("Nate Frazier",    "RB", "Georgia"),           # 947 rush yds
-    ("Jordan Marshall", "RB", "Michigan"),          # 932 rush yds
+    # ── Running Backs ─────────────────────────────────────────────────────────
+    # On board (safety-net entries to ensure they are matched even if board scrape lags)
+    ("Kaytron Allen",   "RB", "Penn State"),        # on board #126
+    # Not yet on board — VERIFY each player actually declared before next run
+    ("Ahmad Hardy",     "RB", "Missouri"),         # 1649 rush yds — UNVERIFIED
+    ("Kewan Lacy",      "RB", "Ole Miss"),          # 1567 rush yds — UNVERIFIED
+    ("Bo Jackson",      "RB", "Ohio State"),        # 1090 rush yds — UNVERIFIED
+    ("Mark Fletcher",   "RB", "Miami"),             # 1192 rush yds — UNVERIFIED
+    ("Nate Frazier",    "RB", "Georgia"),           # 947 rush yds  — UNVERIFIED
+    ("Jordan Marshall", "RB", "Michigan"),          # 932 rush yds  — UNVERIFIED
 
-    # ── Wide Receivers (2025 college season confirmed) ───────────────────────
-    ("Jeremiah Smith",  "WR", "Ohio State"),        # 1243 rec yds, clear #1 WR prospect
-    ("Malachi Toney",   "WR", "Miami"),             # 1211 rec yds
-    ("Eric McAlister",  "WR", "TCU"),               # 1190 rec yds
-    ("Duce Robinson",   "WR", "Florida State"),     # 1074 rec yds
-    ("Chris Brazzell",  "WR", "Tennessee"),         # 1017 rec yds (on board, safety net)
-    ("Cam Coleman",     "WR", "Auburn"),            # 725 rec yds
+    # ── Wide Receivers ───────────────────────────────────────────────────────
+    # On board (safety-net entries)
+    ("Eric McAlister",  "WR", "TCU"),               # on board
+    ("Chris Brazzell",  "WR", "Tennessee"),         # on board
+    # Not yet on board — VERIFY each player actually declared before next run
+    ("Malachi Toney",   "WR", "Miami"),             # 1211 rec yds  — UNVERIFIED
+    ("Duce Robinson",   "WR", "Florida State"),     # 1074 rec yds  — UNVERIFIED
+    ("Cam Coleman",     "WR", "Auburn"),            # 725 rec yds   — UNVERIFIED
 
-    # ── Tight Ends (2025 college season confirmed) ───────────────────────────
-    ("Kenyon Sadiq",    "TE", "Oregon"),            # 560 rec yds (on board #19, safety net)
-    ("Eli Stowers",     "TE", "Vanderbilt"),        # 765 rec yds (on board #64, safety net)
-    ("Michael Trigg",   "TE", "Baylor"),            # 694 rec yds (on board #87, safety net)
-    ("Tanner Koziol",   "TE", "Houston"),           # 727 rec yds, not on board
-    ("Carsen Ryan",     "TE", "BYU"),               # 620 rec yds
+    # ── Tight Ends ───────────────────────────────────────────────────────────
+    # All currently on board (safety-net entries)
+    ("Kenyon Sadiq",    "TE", "Oregon"),            # on board #19
+    ("Eli Stowers",     "TE", "Vanderbilt"),        # on board #59
+    ("Michael Trigg",   "TE", "Baylor"),            # on board #91
+    ("Tanner Koziol",   "TE", "Houston"),           # on board #178
+    ("Carsen Ryan",     "TE", "BYU"),               # on board
 ]
+
+# ─── Manual overrides ────────────────────────────────────────────────────────────
+#
+# Players whose last college season is NOT in the CFBD DB yet (quota lag, late ingestion)
+# but who are confirmed 2026 prospects. Keyed by full_name as stored in cfb-prospect-db.
+# These are applied AFTER the fuzzy-match pass and survive --wipe + re-runs.
+#
+MANUAL_OVERRIDES_2026: dict[str, str] = {
+    # Empty — Jeanty was incorrectly listed here; he is a 2025 pick (Raiders #6).
+}
 
 # ─── Big board scraping (same logic as populate_bigboard.py) ───────────────────
 
@@ -404,10 +431,28 @@ def main() -> None:
         elif status == "NO_MATCH":
             logger.warning("  [NO_MATCH] %r — not found in cfb DB.", name)
 
+    # Manual overrides — apply for players whose CFBD season data lags
+    overrides = MANUAL_OVERRIDES_2026 if draft_year == 2026 else {}
+    overrides_applied = 0
+    for full_name, pos in overrides.items():
+        if not args.dry_run:
+            with get_session(db_path) as session:
+                player = session.query(Player).filter(Player.full_name == full_name).first()
+                if player and player.declared_draft_year != draft_year:
+                    player.declared_draft_year = draft_year
+                    overrides_applied += 1
+                    logger.info("  [OVERRIDE] %r → declared_draft_year=%d", full_name, draft_year)
+                elif player:
+                    logger.info("  [OVERRIDE] %r already set to %d — no change.", full_name, draft_year)
+                else:
+                    logger.warning("  [OVERRIDE] %r — not found in cfb DB.", full_name)
+        else:
+            logger.info("  [OVERRIDE-DRY] %r would be set to %d.", full_name, draft_year)
+
     # Summary
     logger.info(
-        "Results: %d MATCHED | %d REVIEW | %d NO_MATCH (of %d declared).",
-        auto_matched, review_needed, no_match, len(declared_list),
+        "Results: %d MATCHED | %d REVIEW | %d NO_MATCH (of %d declared) | %d manual overrides.",
+        auto_matched, review_needed, no_match, len(declared_list), overrides_applied,
     )
 
     # Write report CSV

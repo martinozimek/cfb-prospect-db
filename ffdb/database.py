@@ -31,6 +31,7 @@ __all__ = [
     "NFLDraftPick",
     "NFLCombineResult",
     "PFFPlayerSeason",
+    "PFFQBSeason",
     "DataIngestionLog",
     "init_db",
     "get_session",
@@ -162,6 +163,7 @@ class CFBTeamSeason(Base):
 
     # Denominators for derived metrics
     pass_attempts = Column(Integer)   # team pass attempts (for rec yards per team pass att)
+    rush_attempts = Column(Integer, nullable=True)   # team total rush attempts that season
     total_receptions = Column(Integer)
     total_rec_yards = Column(Integer)
     total_rush_yards = Column(Integer)
@@ -327,10 +329,83 @@ class PFFPlayerSeason(Base):
     # routes_per_game = routes_run / games_played (stored for convenience)
     routes_per_game = Column(Float)
 
+    # --- Extended receiving metrics ---
+    offense_grade = Column(Float)         # PFF overall offensive grade (0-100)
+    pass_block_grade = Column(Float)      # PFF pass block grade (TE-heavy)
+    slot_rate = Column(Float)             # % of snaps from slot alignment
+    wide_rate = Column(Float)             # % of snaps from wide alignment
+    inline_rate = Column(Float)           # % of snaps inline (TE-specific)
+    targeted_qb_rating = Column(Float)    # passer rating when this player is targeted
+
+    # --- Rushing (from PFF rushing export) ---
+    rush_grade = Column(Float)            # PFF rushing grade (0-100)
+    rush_attempts = Column(Integer)       # designed rush attempts
+    rush_yards = Column(Integer)          # rushing yards
+    rush_tds = Column(Integer)            # rushing touchdowns
+    rush_ypa = Column(Float)              # yards per rush attempt
+    yards_after_contact = Column(Integer) # total yards after first contact (rushing)
+    yco_attempt = Column(Float)           # yards after contact per rush attempt
+    avoided_tackles_rush = Column(Integer)# broken/missed tackles on rushes
+    elusive_rating = Column(Float)        # PFF elusive rating
+    breakaway_percent = Column(Float)     # % of rushes that go 15+ yards
+    run_plays = Column(Integer)           # total designed run plays
+
+    # --- Depth / concept / scheme split data (from PFF split exports) ---
+    # JSON-encoded dicts. Keys are split names (e.g. "short_left", "screen", "man"),
+    # values are dicts of PFF metrics for that split.
+    depth_data   = Column(Text, nullable=True)   # receiving-depth splits
+    concept_data = Column(Text, nullable=True)   # receiving-concept splits
+    scheme_data  = Column(Text, nullable=True)   # receiving-scheme splits
+
     player = relationship("Player", back_populates="pff_seasons")
 
     def __repr__(self) -> str:
         return f"<PFFPlayerSeason player_id={self.player_id} year={self.season_year} yprr={self.yprr}>"
+
+
+class PFFQBSeason(Base):
+    """
+    PFF QB passing season metrics.
+    Used as team-level context feature (join by team + season_year).
+    Source: PFF+ passing export (CSV), position=QB.
+    """
+
+    __tablename__ = "pff_qb_seasons"
+    __table_args__ = (
+        UniqueConstraint("player_name", "season_year", name="uq_pff_qb_season"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_name = Column(String, nullable=False)
+    season_year = Column(Integer, nullable=False)
+    team = Column(String)
+
+    # Volume
+    dropbacks = Column(Integer)
+    attempts = Column(Integer)
+    pass_yards = Column(Integer)
+    pass_tds = Column(Integer)
+    interceptions = Column(Integer)
+
+    # Grade
+    passing_grade = Column(Float)         # grades_pass (0-100)
+
+    # Accuracy / efficiency
+    completion_percent = Column(Float)
+    qb_rating = Column(Float)
+    btt_rate = Column(Float)              # big time throw rate
+    twp_rate = Column(Float)              # turnover worthy play rate
+    avg_depth_of_target = Column(Float)   # aDOT
+    avg_time_to_throw = Column(Float)     # average time to throw
+    ypa = Column(Float)                   # yards per attempt
+
+    # --- Passing split data (from PFF QB split exports) ---
+    pass_depth_data    = Column(Text, nullable=True)   # passing-depth splits
+    pass_pressure_data = Column(Text, nullable=True)   # passing-pressure splits
+    pass_concept_data  = Column(Text, nullable=True)   # passing-concept splits
+
+    def __repr__(self) -> str:
+        return f"<PFFQBSeason {self.player_name!r} {self.season_year} grade={self.passing_grade}>"
 
 
 class DataIngestionLog(Base):
@@ -366,6 +441,32 @@ def _migrate(engine) -> None:
 
     migrations = [
         ("players", "declared_draft_year", "INTEGER"),
+        # PFFPlayerSeason extended columns (added 2026-03-10)
+        ("pff_player_seasons", "offense_grade", "REAL"),
+        ("pff_player_seasons", "pass_block_grade", "REAL"),
+        ("pff_player_seasons", "slot_rate", "REAL"),
+        ("pff_player_seasons", "wide_rate", "REAL"),
+        ("pff_player_seasons", "inline_rate", "REAL"),
+        ("pff_player_seasons", "targeted_qb_rating", "REAL"),
+        ("pff_player_seasons", "rush_grade", "REAL"),
+        ("pff_player_seasons", "rush_attempts", "INTEGER"),
+        ("pff_player_seasons", "rush_yards", "INTEGER"),
+        ("pff_player_seasons", "rush_tds", "INTEGER"),
+        ("pff_player_seasons", "rush_ypa", "REAL"),
+        ("pff_player_seasons", "yards_after_contact", "INTEGER"),
+        ("pff_player_seasons", "yco_attempt", "REAL"),
+        ("pff_player_seasons", "avoided_tackles_rush", "INTEGER"),
+        ("pff_player_seasons", "elusive_rating", "REAL"),
+        ("pff_player_seasons", "breakaway_percent", "REAL"),
+        ("pff_player_seasons", "run_plays", "INTEGER"),
+        # PFFPlayerSeason split data columns (added 2026-03-13)
+        ("pff_player_seasons", "depth_data", "TEXT"),
+        ("pff_player_seasons", "concept_data", "TEXT"),
+        ("pff_player_seasons", "scheme_data", "TEXT"),
+        # PFFQBSeason split data columns (added 2026-03-13)
+        ("pff_qb_seasons", "pass_depth_data", "TEXT"),
+        ("pff_qb_seasons", "pass_pressure_data", "TEXT"),
+        ("pff_qb_seasons", "pass_concept_data", "TEXT"),
     ]
     with engine.connect() as conn:
         for table, col, col_type in migrations:
