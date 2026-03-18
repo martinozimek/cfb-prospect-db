@@ -82,9 +82,11 @@ SUPPLEMENT_2026: list[tuple[str, Optional[str], Optional[str]]] = [
     #       Kenyon Sadiq, Eli Stowers, Michael Trigg, Tanner Koziol, Carsen Ryan
     #   NOT ON BOARD (unverified — confirm each player actually declared before keeping):
     #       Ahmad Hardy, Kewan Lacy, Bo Jackson, Mark Fletcher, Nate Frazier,
-    #       Jordan Marshall, Malachi Toney, Duce Robinson, Cam Coleman
+    #       Jordan Marshall, Malachi Toney
     #   REMOVED (confirmed did NOT declare):
     #       Jeremiah Smith (Ohio State WR) — chose to return for 2026 college season
+    #       Duce Robinson (Florida State WR) — confirmed NOT declared as of 2026-03-17
+    #       Cam Coleman (Auburn WR) — confirmed NOT declared as of 2026-03-17
 
     # ── Running Backs ─────────────────────────────────────────────────────────
     # On board (safety-net entries to ensure they are matched even if board scrape lags)
@@ -103,8 +105,6 @@ SUPPLEMENT_2026: list[tuple[str, Optional[str], Optional[str]]] = [
     ("Chris Brazzell",  "WR", "Tennessee"),         # on board
     # Not yet on board — VERIFY each player actually declared before next run
     ("Malachi Toney",   "WR", "Miami"),             # 1211 rec yds  — UNVERIFIED
-    ("Duce Robinson",   "WR", "Florida State"),     # 1074 rec yds  — UNVERIFIED
-    ("Cam Coleman",     "WR", "Auburn"),            # 725 rec yds   — UNVERIFIED
 
     # ── Tight Ends ───────────────────────────────────────────────────────────
     # All currently on board (safety-net entries)

@@ -115,6 +115,7 @@ def _extract_team_denominators(team_stats: dict[str, Any]) -> dict[str, Optional
         "total_receptions": get("passCompletions", "receptions", "passReceptions"),
         "total_rec_yards": get("netPassingYards", "passingYards", "receivingYards"),
         "total_rush_yards": get("rushingYards", "netRushingYards"),
+        "games": get("games", "gamesPlayed", "game_count"),
     }
 
 
@@ -309,6 +310,7 @@ def _upsert_team_season(session, team: str, year: int, data: dict) -> CFBTeamSea
         session.add(row)
 
     row.conference = data.get("conference")
+    row.games = data.get("games")
     row.pass_attempts = data.get("pass_attempts")
     row.rush_attempts = data.get("rush_attempts")
     row.total_receptions = data.get("total_receptions")
@@ -332,7 +334,10 @@ def _compute_derived(season: CFBPlayerSeason, team_row: Optional[CFBTeamSeason])
     receptions = season.receptions or 0
 
     if team_row.pass_attempts and team_row.pass_attempts > 0:
-        season.rec_yards_per_team_pass_att = round(rec_yards / team_row.pass_attempts, 4)
+        player_games = season.games_played or team_row.games or 1
+        team_games = team_row.games or player_games   # fallback: assume no missed games
+        adj_pass_att = team_row.pass_attempts * player_games / team_games
+        season.rec_yards_per_team_pass_att = round(rec_yards / adj_pass_att, 4)
 
     if team_row.total_rec_yards and team_row.total_rec_yards > 0:
         season.dominator_rating = round(rec_yards / team_row.total_rec_yards, 4)
